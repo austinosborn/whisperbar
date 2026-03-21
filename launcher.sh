@@ -2,6 +2,7 @@
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 RESOURCES="$(cd "$(dirname "$0")" && pwd)/../Resources"
+APP="$(cd "$(dirname "$0")/../.." && pwd)"
 PYTHON="$RESOURCES/venv/bin/python3"
 SCRIPT="$RESOURCES/whisper_statusbar.py"
 
@@ -16,7 +17,7 @@ if ! "$PYTHON" -c "import rumps, faster_whisper, pynput, pyperclip" &>/dev/null 
     osascript <<APPLESCRIPT
 tell application "Terminal"
     activate
-    do script "echo 'Setting up Whisper Dictation (one-time)...' && python3 -m venv --clear '$RESOURCES/venv' && '$RESOURCES/venv/bin/pip' install faster-whisper pyperclip pynput rumps && echo '=== Done! Relaunch Whisper Dictation from Applications. ==='"
+    do script "echo 'Setting up WhisperBar (one-time)...' && python3 -m venv --clear '$RESOURCES/venv' && '$RESOURCES/venv/bin/pip' install faster-whisper pyperclip pynput rumps && echo '=== Setup complete! Launching WhisperBar... ===' && open '$APP'"
 end tell
 APPLESCRIPT
     exit 0

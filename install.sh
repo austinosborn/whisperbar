@@ -51,5 +51,8 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 sleep 2
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
-echo "Once all three permissions are granted, open WhisperBar from your Applications folder."
+echo "Once all three permissions are granted, WhisperBar will be ready to use."
 echo ""
+
+# ── Launch WhisperBar ─────────────────────────────────────────────────────────
+open "$INSTALL_DIR/$APP_NAME"

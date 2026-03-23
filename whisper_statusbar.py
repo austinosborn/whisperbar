@@ -13,6 +13,70 @@ import pyperclip, rumps
 from pynput import keyboard
 from faster_whisper import WhisperModel
 
+# ── GUI fallback panel (shown when menu bar icon is hidden) ───────────────────
+_gui_panel   = None
+_gui_btn     = None
+_gui_delegate = None  # keep a reference so ARC doesn't collect it
+
+def _update_gui_btn(label):
+    global _gui_btn
+    if _gui_btn is not None:
+        try:
+            _gui_btn.setTitle_(label)
+        except Exception:
+            pass
+
+def _build_gui_panel(app):
+    """Create a small always-on-top panel as a fallback when the menu bar icon is hidden."""
+    global _gui_panel, _gui_btn, _gui_delegate
+    try:
+        from AppKit import (NSPanel, NSWindowStyleMaskTitled,
+                            NSWindowStyleMaskClosable,
+                            NSWindowStyleMaskUtilityWindow,
+                            NSFloatingWindowLevel,
+                            NSButton, NSMakeRect, NSObject)
+        import objc
+
+        style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                 NSWindowStyleMaskUtilityWindow)
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(100, 100, 230, 80), style, 2, False)
+        panel.setTitle_("WhisperBar")
+        panel.setLevel_(NSFloatingWindowLevel)
+        panel.setReleasedWhenClosed_(False)
+
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(10, 20, 210, 40))
+        btn.setTitle_("🎙  Click to Record")
+        btn.setBezelStyle_(1)  # rounded
+
+        class _BtnDelegate(NSObject):
+            def clicked_(self, sender):
+                if not app.model:
+                    return
+                if not app.recording:
+                    app._start_recording()
+                    sender.setTitle_("⏹  Click to Stop")
+                else:
+                    app._stop_recording()
+                    sender.setTitle_("🎙  Click to Record")
+
+        delegate = _BtnDelegate.alloc().init()
+        btn.setTarget_(delegate)
+        btn.setAction_(objc.selector(delegate.clicked_, signature=b"v@:@"))
+
+        panel.contentView().addSubview_(btn)
+        panel._whisper_btn = btn
+        panel._whisper_delegate = delegate
+        panel.makeKeyAndOrderFront_(None)
+
+        _gui_panel    = panel
+        _gui_btn      = btn
+        _gui_delegate = delegate
+        return panel
+    except Exception as e:
+        print(f"GUI panel unavailable: {e}", flush=True)
+        return None
+
 # ── Single-instance lock ──────────────────────────────────────────────────────
 LOCK_FILE = "/tmp/whisper_dictation.lock"
 
@@ -39,7 +103,7 @@ def release_lock():
 CONFIG_FILE    = os.path.expanduser("~/.whisper_dictation.json")
 MODEL_SIZE     = "base.en"
 SAMPLE_RATE    = 16000
-DEFAULT_HOTKEY = "ctrl_r"
+DEFAULT_HOTKEY = "cmd_r"
 
 FRIENDLY_NAMES = {
     "ctrl_r": "Right Control", "ctrl_l": "Left Control",
@@ -137,6 +201,7 @@ class WhisperApp(rumps.App):
             self._set_hk_item,
             self._mode_item,
             None,
+            rumps.MenuItem("Show Control Window", callback=self.show_gui_window),
             rumps.MenuItem("Show Terminal", callback=self.show_terminal),
         ]
 
@@ -182,6 +247,10 @@ class WhisperApp(rumps.App):
                 NSApplication.sharedApplication().setApplicationIconImage_(img)
         except Exception:
             pass
+        # On first run (no saved config), show the control window so the user
+        # can interact even if the menu bar icon is hidden by macOS.
+        if not os.path.exists(CONFIG_FILE):
+            self.show_gui_window()
 
     # ── Hotkey config ─────────────────────────────────────────────────────────
 
@@ -272,8 +341,22 @@ class WhisperApp(rumps.App):
         finally:
             if self.tmp_file and os.path.exists(self.tmp_file):
                 os.unlink(self.tmp_file)
+            _update_gui_btn("🎙  Click to Record")
         time.sleep(3)
         self._set("Idle", "🎙️")
+
+    # ── GUI fallback window ───────────────────────────────────────────────────
+
+    def show_gui_window(self, _=None):
+        global _gui_panel
+        if _gui_panel is None:
+            _build_gui_panel(self)
+        else:
+            try:
+                _gui_panel.makeKeyAndOrderFront_(None)
+            except Exception:
+                _gui_panel = None
+                _build_gui_panel(self)
 
     # ── Show Terminal ─────────────────────────────────────────────────────────
 

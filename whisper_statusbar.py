@@ -321,13 +321,19 @@ def _build_control_window(app):
 
         # ── Hide / Quit buttons (bottom row) ──────────────────────────────────
         btn_w = (inner - 8) // 2
+        from AppKit import NSEventModifierFlagCommand
+
         hide_btn = NSButton.alloc().initWithFrame_(NSMakeRect(pad, 10, btn_w, 24))
         hide_btn.setTitle_("Hide Control Window")
         hide_btn.setBezelStyle_(1)
+        hide_btn.setKeyEquivalent_("w")
+        hide_btn.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
 
         quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(pad + btn_w + 8, 10, btn_w, 24))
         quit_btn.setTitle_("Quit Application")
         quit_btn.setBezelStyle_(1)
+        quit_btn.setKeyEquivalent_("q")
+        quit_btn.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
 
         # ── Wire up delegate ──────────────────────────────────────────────────
         d = _WBDelegate.alloc().init()

@@ -86,8 +86,6 @@ echo "  2. Accessibility    — to paste transcribed text"
 echo "  3. Input Monitoring — to detect your hotkey"
 echo ""
 echo "  In each pane, look for 'python3' or 'WhisperBar' and enable its toggle."
-echo "  If you don't see it yet, launch WhisperBar first — it will appear after"
-echo "  the app requests the permission."
 echo ""
 echo "Opening System Settings now..."
 echo ""
@@ -114,9 +112,7 @@ echo ""
 open "$INSTALL_DIR/$APP_NAME"
 
 osascript <<'APPLESCRIPT'
-display dialog "WhisperBar is installed and running.
-
-Check the control window for any permission warnings, then press Right Command to start dictating — press again to stop and paste." buttons {"Done"} default button "Done" with icon note
+display dialog "WhisperBar is installed and running." buttons {"Done"} default button "Done" with icon note
 APPLESCRIPT
 
 # Keep the terminal open so the instructions above remain readable.

@@ -51,7 +51,7 @@ if [ -z "$LATEST_URL" ]; then
 fi
 
 echo "→ Downloading $(basename "$LATEST_URL")..."
-curl -# "$LATEST_URL" -o "$TMP_DIR/WhisperBar.zip"
+curl -fL --progress-bar "$LATEST_URL" -o "$TMP_DIR/WhisperBar.zip"
 
 # ── Install ───────────────────────────────────────────────────────────────────
 echo "→ Installing to $INSTALL_DIR..."
@@ -81,16 +81,11 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "System Settings will open for each permission."
 echo ""
-echo "  1. Microphone      — approve the system prompt when WhisperBar launches"
-echo "  2. Input Monitoring — approve the system prompt when WhisperBar launches"
-echo "  3. Accessibility   — must be added MANUALLY:"
+echo "  1. Microphone       — to record your voice"
+echo "  2. Accessibility    — to paste transcribed text"
+echo "  3. Input Monitoring — to detect your hotkey"
 echo ""
-echo "     a) System Settings → Privacy & Security → Accessibility"
-echo "     b) Click the lock icon to unlock"
-echo "     c) Click + and navigate to /usr/bin/python3"
-echo "        (If that doesn't work, open WhisperBar first — the log panel"
-echo "         shows the exact Python path under 'Python: ...')"
-echo "     d) Enable the toggle next to python3"
+echo "  Enable the toggle for python3 in each pane that opens."
 echo ""
 echo "Opening System Settings now..."
 echo ""
@@ -102,6 +97,10 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 sleep 1
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
+echo "  ⚠️  Three System Settings windows have opened in the background."
+echo "  Click back through each one and make sure all three permissions"
+echo "  are enabled before launching WhisperBar."
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Launching WhisperBar..."
@@ -111,3 +110,12 @@ echo "Once ready, hold Right Command and speak — text pastes on release."
 echo ""
 
 open "$INSTALL_DIR/$APP_NAME"
+
+osascript <<'APPLESCRIPT'
+display dialog "WhisperBar is installed and running.
+
+Check the control window for permission warnings, then hold Right Command and speak." buttons {"Done"} default button "Done" with icon note
+APPLESCRIPT
+
+# Keep the terminal open so the instructions above remain readable.
+exec $SHELL

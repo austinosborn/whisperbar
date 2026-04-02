@@ -111,9 +111,9 @@ def load_config():
     try:
         with open(CONFIG_FILE) as f:
             data = json.load(f)
-        return str_to_key(data.get("hotkey", DEFAULT_HOTKEY)), data.get("toggle_mode", False)
+        return str_to_key(data.get("hotkey", DEFAULT_HOTKEY)), data.get("toggle_mode", True)
     except Exception:
-        return str_to_key(DEFAULT_HOTKEY), False
+        return str_to_key(DEFAULT_HOTKEY), True
 
 def save_config(key, toggle_mode):
     try:
@@ -459,7 +459,10 @@ class WhisperApp(rumps.App):
         self._set("Loading model…", "⏳")
         self.model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
         self._set("Idle", "🎙️")
-        print(f"Model ready. Hold {friendly(self.hotkey)} to dictate.", flush=True)
+        if self.toggle_mode:
+            print(f"Model ready. Press {friendly(self.hotkey)} to begin dictation.", flush=True)
+        else:
+            print(f"Model ready. Hold {friendly(self.hotkey)} to dictate.", flush=True)
         _show_control_window(self)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -481,7 +484,10 @@ class WhisperApp(rumps.App):
         self.toggle_mode = not self.toggle_mode
         self._mode_item.state = int(self.toggle_mode)
         save_config(self.hotkey, self.toggle_mode)
-        print(f"Mode: {'Toggle' if self.toggle_mode else 'Hold'}", flush=True)
+        if self.toggle_mode:
+            print(f"Mode: Toggle — Press {friendly(self.hotkey)} to begin dictation.", flush=True)
+        else:
+            print(f"Mode: Hold — Hold {friendly(self.hotkey)} to dictate.", flush=True)
         try:
             from Foundation import NSOperationQueue
             tm = self.toggle_mode
@@ -497,7 +503,10 @@ class WhisperApp(rumps.App):
         self._hotkey_item.title = f"Hotkey: {name}"
         self._set_hk_item.title = "Set Hotkey…"
         self._set("Idle", "🎙️")
-        print(f"Hotkey: {name}", flush=True)
+        if self.toggle_mode:
+            print(f"Hotkey: {name} — Press to begin dictation.", flush=True)
+        else:
+            print(f"Hotkey: {name} — Hold to dictate.", flush=True)
         _update_gui_hotkey_btn(f"Hotkey: {name}")
 
     # ── Keyboard listener ─────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WhisperBar — macOS status bar app
+WhisperBar — macOS status bar dictation app
 Hold hotkey → speak → release → transcribed text is pasted.
 
 Dependencies:
@@ -13,72 +13,49 @@ import pyperclip, rumps
 from pynput import keyboard
 from faster_whisper import WhisperModel
 
-# ── GUI fallback panel (shown when menu bar icon is hidden) ───────────────────
-_gui_panel   = None
-_gui_btn     = None
-_gui_delegate = None  # keep a reference so ARC doesn't collect it
+LOG_FILE       = os.path.expanduser("~/Library/Logs/WhisperBar.log")
+LOCK_FILE      = "/tmp/whisper_dictation.lock"
+CONFIG_FILE    = os.path.expanduser("~/.whisper_dictation.json")
+MODEL_SIZE     = "base.en"
+SAMPLE_RATE    = 16000
+DEFAULT_HOTKEY = "cmd_r"
 
-def _update_gui_btn(label):
-    global _gui_btn
-    if _gui_btn is not None:
-        try:
-            _gui_btn.setTitle_(label)
-        except Exception:
-            pass
+# ── Log capture — feeds log file and the GUI text view ────────────────────────
 
-def _build_gui_panel(app):
-    """Create a small always-on-top panel as a fallback when the menu bar icon is hidden."""
-    global _gui_panel, _gui_btn, _gui_delegate
-    try:
-        from AppKit import (NSPanel, NSWindowStyleMaskTitled,
-                            NSWindowStyleMaskClosable,
-                            NSWindowStyleMaskUtilityWindow,
-                            NSFloatingWindowLevel,
-                            NSButton, NSMakeRect, NSObject)
-        import objc
+class _LogCapture:
+    def __init__(self, stream):
+        self._stream = stream
+        self._lines  = []
+        self._gui_cb = None   # set to fn(str) once GUI is ready
 
-        style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                 NSWindowStyleMaskUtilityWindow)
-        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(100, 100, 230, 80), style, 2, False)
-        panel.setTitle_("WhisperBar")
-        panel.setLevel_(NSFloatingWindowLevel)
-        panel.setReleasedWhenClosed_(False)
+    def write(self, s):
+        self._stream.write(s)
+        text = s.rstrip("\n")
+        if text:
+            self._lines.append(text)
+            if len(self._lines) > 200:
+                self._lines = self._lines[-200:]
+            if self._gui_cb:
+                snapshot = "\n".join(self._lines[-40:])
+                cb = self._gui_cb
+                try:
+                    from Foundation import NSOperationQueue
+                    NSOperationQueue.mainQueue().addOperationWithBlock_(
+                        lambda s=snapshot: cb(s))
+                except Exception:
+                    pass
 
-        btn = NSButton.alloc().initWithFrame_(NSMakeRect(10, 20, 210, 40))
-        btn.setTitle_("🎙  Click to Record")
-        btn.setBezelStyle_(1)  # rounded
+    def flush(self):
+        self._stream.flush()
 
-        class _BtnDelegate(NSObject):
-            def clicked_(self, sender):
-                if not app.model:
-                    return
-                if not app.recording:
-                    app._start_recording()
-                    sender.setTitle_("⏹  Click to Stop")
-                else:
-                    app._stop_recording()
-                    sender.setTitle_("🎙  Click to Record")
+    def fileno(self):
+        return self._stream.fileno()
 
-        delegate = _BtnDelegate.alloc().init()
-        btn.setTarget_(delegate)
-        btn.setAction_(objc.selector(delegate.clicked_, signature=b"v@:@"))
-
-        panel.contentView().addSubview_(btn)
-        panel._whisper_btn = btn
-        panel._whisper_delegate = delegate
-        panel.makeKeyAndOrderFront_(None)
-
-        _gui_panel    = panel
-        _gui_btn      = btn
-        _gui_delegate = delegate
-        return panel
-    except Exception as e:
-        print(f"GUI panel unavailable: {e}", flush=True)
-        return None
+_log = _LogCapture(sys.stdout)
+sys.stdout = _log
+sys.stderr = _log
 
 # ── Single-instance lock ──────────────────────────────────────────────────────
-LOCK_FILE = "/tmp/whisper_dictation.lock"
 
 def acquire_lock():
     if os.path.exists(LOCK_FILE):
@@ -99,11 +76,7 @@ def release_lock():
     except OSError:
         pass
 
-# ── Persistent config ─────────────────────────────────────────────────────────
-CONFIG_FILE    = os.path.expanduser("~/.whisper_dictation.json")
-MODEL_SIZE     = "base.en"
-SAMPLE_RATE    = 16000
-DEFAULT_HOTKEY = "cmd_r"
+# ── Config ────────────────────────────────────────────────────────────────────
 
 FRIENDLY_NAMES = {
     "ctrl_r": "Right Control", "ctrl_l": "Left Control",
@@ -152,11 +125,13 @@ def save_config(key, toggle_mode):
         pass
 
 def open_privacy_pane(pane):
-    url = f"x-apple.systempreferences:com.apple.preference.security?{pane}"
-    subprocess.Popen(["open", url])
+    subprocess.Popen(["open",
+        f"x-apple.systempreferences:com.apple.preference.security?{pane}"])
 
-# ── CoreGraphics Cmd+V injection (thread-safe, no osascript) ──────────────────
-_cg = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+# ── CoreGraphics Cmd+V injection ──────────────────────────────────────────────
+
+_cg = ctypes.cdll.LoadLibrary(
+    "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
 _cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
 _cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 _cg.CGEventPost.argtypes     = [ctypes.c_uint32, ctypes.c_void_p]
@@ -176,22 +151,260 @@ def type_text(text):
     time.sleep(0.1)
     pyperclip.copy(prev)
 
+# ── GUI control window ────────────────────────────────────────────────────────
+# ObjC class at module level — PyObjC must register it exactly once.
+
+_gui_window      = None
+_gui_record_btn  = None
+_gui_hotkey_btn  = None
+_gui_hold_radio  = None
+_gui_toggle_radio = None
+_gui_log_view    = None
+_gui_delegate    = None
+
+try:
+    from AppKit import NSObject as _NSObject
+    class _WBDelegate(_NSObject):
+        _app = None
+
+        def recordClicked_(self, sender):
+            a = self._app
+            if not a or not a.model:
+                return
+            if not a.recording:
+                a._start_recording()
+                sender.setTitle_("⏹  Click to Stop")
+            else:
+                a._stop_recording()
+                sender.setTitle_("🎙  Click to Record")
+
+        def hotkeyClicked_(self, sender):
+            a = self._app
+            if not a:
+                return
+            a._setting_hotkey = True
+            sender.setTitle_("Press any key…")
+            a._set("Press new hotkey…", "⌨️")
+
+        def holdClicked_(self, sender):
+            a = self._app
+            if not a or not a.toggle_mode:
+                return
+            a.toggle_mode = False
+            a._mode_item.state = 0
+            save_config(a.hotkey, False)
+            _sync_mode_radios(False)
+
+        def toggleClicked_(self, sender):
+            a = self._app
+            if not a or a.toggle_mode:
+                return
+            a.toggle_mode = True
+            a._mode_item.state = 1
+            save_config(a.hotkey, True)
+            _sync_mode_radios(True)
+
+        def hideClicked_(self, sender):
+            if _gui_window:
+                _gui_window.orderOut_(None)
+
+        def quitClicked_(self, sender):
+            rumps.quit_application()
+
+except Exception:
+    _WBDelegate = None
+
+
+def _sync_mode_radios(toggle_mode):
+    if _gui_hold_radio and _gui_toggle_radio:
+        _gui_hold_radio.setState_(0 if toggle_mode else 1)
+        _gui_toggle_radio.setState_(1 if toggle_mode else 0)
+
+def _update_gui_record_btn(label):
+    if _gui_record_btn:
+        try:
+            from Foundation import NSOperationQueue
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _gui_record_btn.setTitle_(label))
+        except Exception:
+            pass
+
+def _update_gui_hotkey_btn(label):
+    if _gui_hotkey_btn:
+        try:
+            from Foundation import NSOperationQueue
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _gui_hotkey_btn.setTitle_(label))
+        except Exception:
+            pass
+
+def _update_gui_log(text):
+    if _gui_log_view:
+        try:
+            _gui_log_view.setString_(text)
+            s = _gui_log_view.string()
+            _gui_log_view.scrollRangeToVisible_((len(s), 0))
+        except Exception:
+            pass
+
+def _build_control_window(app):
+    """Build the floating control window. Call on main thread."""
+    global _gui_window, _gui_record_btn, _gui_hotkey_btn
+    global _gui_hold_radio, _gui_toggle_radio, _gui_log_view, _gui_delegate
+
+    try:
+        from AppKit import (NSWindow, NSButton, NSScrollView, NSTextView,
+                            NSBox, NSFont, NSMakeRect, NSApp, NSColor,
+                            NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
+                            NSFloatingWindowLevel, NSBackingStoreBuffered,
+                            NSButtonTypeRadio)
+
+        W = 440  # window content width
+
+        # ── Window ────────────────────────────────────────────────────────────
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(200, 200, W, 330),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+            NSBackingStoreBuffered, False)
+        win.setTitle_("WhisperBar")
+        win.setLevel_(NSFloatingWindowLevel)
+        win.setReleasedWhenClosed_(False)
+        cv = win.contentView()
+        pad = 10
+        inner = W - pad * 2  # 420
+
+        # ── Record button  (top) ──────────────────────────────────────────────
+        rec = NSButton.alloc().initWithFrame_(NSMakeRect(pad, 284, inner, 36))
+        rec.setTitle_("🎙  Click to Record")
+        rec.setBezelStyle_(1)
+
+        # ── Set Hotkey button ─────────────────────────────────────────────────
+        hk = NSButton.alloc().initWithFrame_(NSMakeRect(pad, 240, inner, 36))
+        hk.setTitle_(f"Hotkey: {friendly(app.hotkey)}")
+        hk.setBezelStyle_(1)
+
+        # ── Hold / Toggle radio buttons ───────────────────────────────────────
+        half = (inner - 8) // 2
+        hold_r = NSButton.alloc().initWithFrame_(NSMakeRect(pad, 214, half, 22))
+        hold_r.setTitle_("Hold to Record")
+        hold_r.setButtonType_(NSButtonTypeRadio)
+        hold_r.setState_(0 if app.toggle_mode else 1)
+
+        tog_r = NSButton.alloc().initWithFrame_(NSMakeRect(pad + half + 8, 214, half, 22))
+        tog_r.setTitle_("Toggle Record")
+        tog_r.setButtonType_(NSButtonTypeRadio)
+        tog_r.setState_(1 if app.toggle_mode else 0)
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        sep_top = NSBox.alloc().initWithFrame_(NSMakeRect(pad, 206, inner, 1))
+        sep_top.setBoxType_(2)
+
+        # ── Log scroll view ───────────────────────────────────────────────────
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(pad, 46, inner, 156))
+        scroll.setBorderType_(1)
+        scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(True)
+
+        tv = NSTextView.alloc().initWithFrame_(scroll.contentView().frame())
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setFont_(NSFont.fontWithName_size_("Menlo", 10))
+        tv.setBackgroundColor_(NSColor.textBackgroundColor())
+        tv.setString_("\n".join(_log._lines[-40:]))
+        scroll.setDocumentView_(tv)
+        s = tv.string()
+        tv.scrollRangeToVisible_((len(s), 0))
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        sep_bot = NSBox.alloc().initWithFrame_(NSMakeRect(pad, 38, inner, 1))
+        sep_bot.setBoxType_(2)
+
+        # ── Hide / Quit buttons (bottom row) ──────────────────────────────────
+        btn_w = (inner - 8) // 2
+        hide_btn = NSButton.alloc().initWithFrame_(NSMakeRect(pad, 10, btn_w, 24))
+        hide_btn.setTitle_("Hide Control Window")
+        hide_btn.setBezelStyle_(1)
+
+        quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(pad + btn_w + 8, 10, btn_w, 24))
+        quit_btn.setTitle_("Quit Application")
+        quit_btn.setBezelStyle_(1)
+
+        # ── Wire up delegate ──────────────────────────────────────────────────
+        d = _WBDelegate.alloc().init()
+        d._app = app
+
+        for btn, sel in [(rec,      "recordClicked:"),
+                         (hk,       "hotkeyClicked:"),
+                         (hold_r,   "holdClicked:"),
+                         (tog_r,    "toggleClicked:"),
+                         (hide_btn, "hideClicked:"),
+                         (quit_btn, "quitClicked:")]:
+            btn.setTarget_(d)
+            btn.setAction_(sel)
+
+        # ── Add subviews ──────────────────────────────────────────────────────
+        for v in (rec, hk, hold_r, tog_r, sep_top, scroll, sep_bot, hide_btn, quit_btn):
+            cv.addSubview_(v)
+
+        win.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+        _gui_window      = win
+        _gui_record_btn  = rec
+        _gui_hotkey_btn  = hk
+        _gui_hold_radio  = hold_r
+        _gui_toggle_radio = tog_r
+        _gui_log_view    = tv
+        _gui_delegate    = d
+
+        _log._gui_cb = _update_gui_log
+
+    except Exception as e:
+        import traceback
+        print(f"Control window error: {e}", flush=True)
+        traceback.print_exc()
+
+
+def _show_control_window(app):
+    """Show (or build) the control window. Safe to call from any thread."""
+    try:
+        from Foundation import NSOperationQueue
+        NSOperationQueue.mainQueue().addOperationWithBlock_(
+            lambda: _do_show_control_window(app))
+    except Exception as e:
+        print(f"GUI dispatch failed: {e}", flush=True)
+
+def _do_show_control_window(app):
+    global _gui_window
+    if _gui_window is None:
+        _build_control_window(app)
+    else:
+        try:
+            from AppKit import NSApp
+            _gui_window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            _gui_window = None
+            _build_control_window(app)
+
+
+# ── Main app ──────────────────────────────────────────────────────────────────
 
 class WhisperApp(rumps.App):
     def __init__(self):
         super().__init__("🎙️", quit_button="Quit")
 
         self.hotkey, self.toggle_mode = load_config()
-        self.recording = False
-        self.sox_proc  = None
-        self.tmp_file  = None
-        self.model     = None
+        self.recording       = False
+        self.sox_proc        = None
+        self.tmp_file        = None
+        self.model           = None
         self._setting_hotkey = False
 
-        self._status_item  = rumps.MenuItem("Status: Idle")
-        self._hotkey_item  = rumps.MenuItem(f"Hotkey: {friendly(self.hotkey)}")
-        self._set_hk_item  = rumps.MenuItem("Set Hotkey…", callback=self.start_set_hotkey)
-        self._mode_item    = rumps.MenuItem("Toggle Mode", callback=self.toggle_mode_cb)
+        self._status_item = rumps.MenuItem("Status: Idle")
+        self._hotkey_item = rumps.MenuItem(f"Hotkey: {friendly(self.hotkey)}")
+        self._set_hk_item = rumps.MenuItem("Set Hotkey…", callback=self.start_set_hotkey)
+        self._mode_item   = rumps.MenuItem("Toggle Mode", callback=self.toggle_mode_cb)
         self._mode_item.state = int(self.toggle_mode)
 
         self.menu = [
@@ -201,14 +414,53 @@ class WhisperApp(rumps.App):
             self._set_hk_item,
             self._mode_item,
             None,
-            rumps.MenuItem("Show Control Window", callback=self.show_gui_window),
-            rumps.MenuItem("Show Terminal", callback=self.show_terminal),
+            rumps.MenuItem("Show Control Window", callback=self.show_control_window),
+            rumps.MenuItem("View Log", callback=self.view_log),
         ]
 
         threading.Thread(target=self._load_model, daemon=True).start()
         self._listener = keyboard.Listener(
             on_press=self._on_press, on_release=self._on_release)
         self._listener.start()
+
+    # ── Startup ───────────────────────────────────────────────────────────────
+
+    def _check_accessibility(self):
+        try:
+            appserv = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+            appserv.AXIsProcessTrusted.restype = ctypes.c_bool
+            if not appserv.AXIsProcessTrusted():
+                print("⚠️  Accessibility not granted — pasting won't work.", flush=True)
+                print("   Go to System Settings → Privacy → Accessibility", flush=True)
+                print("   and add python3, then relaunch WhisperBar.", flush=True)
+                open_privacy_pane("Privacy_Accessibility")
+        except Exception:
+            pass
+
+    def _request_microphone(self):
+        try:
+            from AVFoundation import AVCaptureDevice
+            status = AVCaptureDevice.authorizationStatusForMediaType_("soun")
+            if status == 0:
+                AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                    "soun", lambda granted: None)
+            elif status == 2:
+                print("⚠️  Microphone denied. Enable in System Settings → Privacy → Microphone.", flush=True)
+                open_privacy_pane("Privacy_Microphone")
+        except Exception:
+            pass
+
+    def _load_model(self):
+        print(f"Python: {sys.executable}", flush=True)
+        self._check_accessibility()
+        self._request_microphone()
+        print(f"Loading Whisper model '{MODEL_SIZE}'…", flush=True)
+        self._set("Loading model…", "⏳")
+        self.model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
+        self._set("Idle", "🎙️")
+        print(f"Model ready. Hold {friendly(self.hotkey)} to dictate.", flush=True)
+        _show_control_window(self)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -217,55 +469,26 @@ class WhisperApp(rumps.App):
         if icon:
             self.title = icon
 
-    def _request_microphone(self):
-        try:
-            from AVFoundation import AVCaptureDevice
-            status = AVCaptureDevice.authorizationStatusForMediaType_("soun")
-            if status == 0:  # Not determined — trigger system prompt
-                AVCaptureDevice.requestAccessForMediaType_completionHandler_(
-                    "soun", lambda granted: None)
-            elif status == 2:  # Denied — open settings
-                print("Microphone access denied. Enable Terminal in System Settings → Privacy & Security → Microphone.", flush=True)
-                open_privacy_pane("Privacy_Microphone")
-        except Exception:
-            pass
-
-    def _load_model(self):
-        self._request_microphone()
-        print(f"Loading Whisper model '{MODEL_SIZE}'…", flush=True)
-        self._set("Loading model…", "⏳")
-        self.model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
-        self._set("Idle", "🎙️")
-        print(f"Model ready. Hold {friendly(self.hotkey)} to dictate.", flush=True)
-        try:
-            from AppKit import NSApplication, NSImage
-            from Foundation import NSProcessInfo
-            NSProcessInfo.processInfo().setProcessName_("WhisperBar")
-            img = NSImage.alloc().initWithContentsOfFile_(
-                '/Applications/WhisperBar.app/Contents/Resources/AppIcon.icns')
-            if img:
-                NSApplication.sharedApplication().setApplicationIconImage_(img)
-        except Exception:
-            pass
-        # On first run (no saved config), show the control window so the user
-        # can interact even if the menu bar icon is hidden by macOS.
-        if not os.path.exists(CONFIG_FILE):
-            self.show_gui_window()
-
     # ── Hotkey config ─────────────────────────────────────────────────────────
 
-    def start_set_hotkey(self, _):
+    def start_set_hotkey(self, _=None):
         self._setting_hotkey = True
         self._set_hk_item.title = "Press any key…"
         self._set("Press new hotkey…", "⌨️")
-        print("Press the key you want to use as your hotkey…", flush=True)
+        _update_gui_hotkey_btn("Press any key…")
 
-    def toggle_mode_cb(self, _):
+    def toggle_mode_cb(self, _=None):
         self.toggle_mode = not self.toggle_mode
         self._mode_item.state = int(self.toggle_mode)
         save_config(self.hotkey, self.toggle_mode)
-        mode_name = "Toggle" if self.toggle_mode else "Hold"
-        print(f"Mode set to: {mode_name}", flush=True)
+        print(f"Mode: {'Toggle' if self.toggle_mode else 'Hold'}", flush=True)
+        try:
+            from Foundation import NSOperationQueue
+            tm = self.toggle_mode
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: _sync_mode_radios(tm))
+        except Exception:
+            pass
 
     def _apply_hotkey(self, key):
         self.hotkey = key
@@ -274,7 +497,8 @@ class WhisperApp(rumps.App):
         self._hotkey_item.title = f"Hotkey: {name}"
         self._set_hk_item.title = "Set Hotkey…"
         self._set("Idle", "🎙️")
-        print(f"Hotkey set to: {name}", flush=True)
+        print(f"Hotkey: {name}", flush=True)
+        _update_gui_hotkey_btn(f"Hotkey: {name}")
 
     # ── Keyboard listener ─────────────────────────────────────────────────────
 
@@ -298,11 +522,14 @@ class WhisperApp(rumps.App):
         if key == self.hotkey and self.recording and not self.toggle_mode:
             self._stop_recording()
 
+    # ── Recording ─────────────────────────────────────────────────────────────
+
     def _start_recording(self):
         self.recording = True
         self.tmp_file  = tempfile.mktemp(suffix=".wav")
         self._set("Recording…", "🔴")
         print("● Recording…", flush=True)
+        _update_gui_record_btn("⏹  Click to Stop")
         self.sox_proc = subprocess.Popen(
             ["sox", "-d", "-r", str(SAMPLE_RATE), "-c", "1", "-b", "16", self.tmp_file],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -318,7 +545,6 @@ class WhisperApp(rumps.App):
 
     # ── Transcribe & paste ────────────────────────────────────────────────────
 
-    # Hallucinations faster-whisper produces on silence
     HALLUCINATIONS = {
         "you", "you.", "thank you.", "thanks for watching.",
         "thank you for watching.", "thank you so much.", "bye.", "bye-bye.", ".", " ",
@@ -341,49 +567,22 @@ class WhisperApp(rumps.App):
         finally:
             if self.tmp_file and os.path.exists(self.tmp_file):
                 os.unlink(self.tmp_file)
-            _update_gui_btn("🎙  Click to Record")
+            _update_gui_record_btn("🎙  Click to Record")
         time.sleep(3)
         self._set("Idle", "🎙️")
 
-    # ── GUI fallback window ───────────────────────────────────────────────────
+    # ── Menu actions ──────────────────────────────────────────────────────────
 
-    def show_gui_window(self, _=None):
-        global _gui_panel
-        if _gui_panel is None:
-            _build_gui_panel(self)
-        else:
-            try:
-                _gui_panel.makeKeyAndOrderFront_(None)
-            except Exception:
-                _gui_panel = None
-                _build_gui_panel(self)
+    def show_control_window(self, _=None):
+        _show_control_window(self)
 
-    # ── Show Terminal ─────────────────────────────────────────────────────────
-
-    def show_terminal(self, _):
-        subprocess.run(['osascript', '-e', '''
-            tell application "Terminal"
-                activate
-                repeat with w in windows
-                    if contents of w contains "whisper_statusbar" then
-                        set miniaturized of w to false
-                    end if
-                end repeat
-            end tell
-        '''])
+    def view_log(self, _):
+        subprocess.Popen(["open", "-a", "Console", LOG_FILE])
 
 
 if __name__ == "__main__":
     if not acquire_lock():
         print("WhisperBar is already running.", flush=True)
-        time.sleep(1)
-        try:
-            with open("/tmp/whisper_terminal_wid") as f:
-                wid = f.read().strip()
-            subprocess.run(['osascript', '-e',
-                f'tell application "Terminal" to close (first window whose id is {wid})'])
-        except Exception:
-            pass
         sys.exit(0)
     try:
         WhisperApp().run()

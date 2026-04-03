@@ -262,9 +262,10 @@ def _build_control_window(app):
         W = 440  # window content width
 
         # ── Window ────────────────────────────────────────────────────────────
+        from AppKit import NSWindowStyleMaskMiniaturizable
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(200, 200, W, 330),
-            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable,
             NSBackingStoreBuffered, False)
         win.setTitle_("WhisperBar")
         win.setLevel_(NSFloatingWindowLevel)

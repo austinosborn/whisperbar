@@ -13,6 +13,40 @@ import pyperclip, rumps
 from pynput import keyboard
 from faster_whisper import WhisperModel
 
+# ── Identity — must run before NSApplication is fully initialized ─────────────
+try:
+    from AppKit import (NSApplication, NSImage, NSMakeSize, NSMakeRect,
+                        NSColor, NSBezierPath, NSAttributedString,
+                        NSFontAttributeName, NSForegroundColorAttributeName,
+                        NSApplicationActivationPolicyAccessory)
+    from Foundation import NSProcessInfo
+
+    NSProcessInfo.processInfo().setProcessName_("WhisperBar")
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory)
+
+    def _make_icon():
+        """Render a 🎙 emoji onto a dark rounded square as the app icon."""
+        from AppKit import NSFont, NSGraphicsContext
+        size = 512.0
+        img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
+        img.lockFocus()
+        NSColor.colorWithRed_green_blue_alpha_(0.13, 0.13, 0.18, 1.0).set()
+        bg = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0, 0, size, size), 110, 110)
+        bg.fill()
+        attrs = {NSFontAttributeName: NSFont.systemFontOfSize_(370),
+                 NSForegroundColorAttributeName: NSColor.whiteColor()}
+        label = NSAttributedString.alloc().initWithString_attributes_("🎙", attrs)
+        label.drawAtPoint_((68, 62))
+        img.unlockFocus()
+        return img
+
+    _app_icon = _make_icon()
+    NSApplication.sharedApplication().setApplicationIconImage_(_app_icon)
+except Exception as _e:
+    print(f"Icon setup: {_e}", flush=True)
+
 LOG_FILE       = os.path.expanduser("~/Library/Logs/WhisperBar.log")
 LOCK_FILE      = "/tmp/whisper_dictation.lock"
 CONFIG_FILE    = os.path.expanduser("~/.whisper_dictation.json")
